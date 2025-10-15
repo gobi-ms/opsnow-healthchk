@@ -1,12 +1,10 @@
-name: Deploy to EC2 via SSM
+name: Build → Push → Deploy (ECR → EC2 via SSM)
 
 on:
+  push:
+    branches: [ main, dev ]
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "ECR image tag to deploy"
-        required: true
-        default: "latest"
       entry_command:
         description: "Container command (override if needed)"
         required: false
@@ -16,24 +14,33 @@ on:
         required: false
         default: "true"
 
+concurrency:
+  group: healthcheck-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: 211125621923
+  ECR_REPOSITORY: opsnow-healthcheck
+  ENTRY_CMD: ${{ inputs.entry_command }}
+
 jobs:
-  deploy:
+  build_and_push:
     runs-on: ubuntu-latest
     environment: opsnow-healthcheck
     permissions:
       id-token: write
       contents: read
-
-    env:
-      AWS_REGION: us-east-1
-      AWS_ACCOUNT_ID: 211125621923
-      ECR_REPOSITORY: opsnow-healthcheck
-      IMAGE_URI: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}
-      IMAGE_TAG: ${{ inputs.image_tag }}
-      ENTRY_CMD: ${{ inputs.entry_command }}
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+      image_digest: ${{ steps.push.outputs.image_digest }}
 
     steps:
-      - name: Configure AWS (assume GitHub OIDC role)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::211125621923:role/Opsnow
@@ -41,66 +48,105 @@ jobs:
           audience: sts.amazonaws.com
           output-env-credentials: true
 
-      # Resolve the immutable digest for the chosen tag
-      - name: Resolve image digest from ECR
-        id: digest
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image metadata
+        id: meta
         run: |
-          set -e
+          set -euo pipefail
+          IMAGE_TAG="${GITHUB_SHA}"               # immutable per commit (or use 'latest')
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          echo "image_tag=$IMAGE_TAG"   >> "$GITHUB_OUTPUT"
+          echo "image_uri=$IMAGE_URI"   >> "$GITHUB_OUTPUT"
+          echo "Using IMAGE_URI=$IMAGE_URI"
+
+      - name: Build and push
+        id: push
+        run: |
+          set -euo pipefail
+          docker build -t "${{ steps.meta.outputs.image_uri }}" .
+          docker push "${{ steps.meta.outputs.image_uri }}"
+          # Resolve digest after push
           DIGEST=$(aws ecr describe-images \
             --repository-name "${ECR_REPOSITORY}" \
-            --image-ids imageTag="${IMAGE_TAG}" \
+            --image-ids imageTag="${{ steps.meta.outputs.image_tag }}" \
             --query 'imageDetails[0].imageDigest' --output text)
           if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
-            echo "ECR image with tag '${IMAGE_TAG}' not found in ${ECR_REPOSITORY}"
-            exit 1
+            echo "Failed to resolve image digest after push"; exit 1
           fi
-          echo "IMAGE_DIGEST=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "Resolved digest: $DIGEST"
+          echo "image_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Pushed and resolved digest: $DIGEST"
+
+  deploy:
+    needs: build_and_push
+    runs-on: ubuntu-latest
+    environment: opsnow-healthcheck
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}   # includes repo + tag
+      IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
+      ENTRY_CMD: ${{ inputs.entry_command }}
+    steps:
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::211125621923:role/Opsnow
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+          output-env-credentials: true
 
       # Deploy via SSM to explicit instance IDs (preferred)
       - name: Deploy to EC2 by Instance IDs
         if: ${{ inputs.use_instance_ids == 'true' }}
         run: |
-          set -e
+          set -euo pipefail
+          IDS=$(echo "${{ vars.EC2_INSTANCE_IDS }}" | tr -d ' ')
+          if [ -z "$IDS" ]; then echo "EC2_INSTANCE_IDS repo var is empty"; exit 1; fi
+
           aws ssm send-command \
             --region "${AWS_REGION}" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy ${IMAGE_URI}@${{ steps.digest.outputs.IMAGE_DIGEST }}" \
+            --comment "Deploy ${IMAGE_URI}@${IMAGE_DIGEST}" \
             --parameters commands='[
-              "set -e",
+              "set -euo pipefail",
               "aws ecr get-login-password --region '"${AWS_REGION}"' | docker login --username AWS --password-stdin '"${AWS_ACCOUNT_ID}"'.dkr.ecr.'"${AWS_REGION}"'.amazonaws.com",
-              "docker pull '"${IMAGE_URI}"'@'${{ steps.digest.outputs.IMAGE_DIGEST }}'",
+              "docker pull '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"'",
               "docker stop opsnow-healthcheck || true",
               "docker rm opsnow-healthcheck || true",
-              "docker run -d --name opsnow-healthcheck --restart unless-stopped '"${IMAGE_URI}"'@'${{ steps.digest.outputs.IMAGE_DIGEST }}' '"${ENTRY_CMD}"'"
+              "docker run -d --name opsnow-healthcheck --restart unless-stopped '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"' '"${ENTRY_CMD}"'"
             ]' \
-            --instance-ids $(echo "${{ vars.EC2_INSTANCE_IDS }}" | tr -d ' ') \
+            --instance-ids $IDS \
             --output text
 
       # Or deploy to all running instances with a specific tag (set EC2_TAG_KEY / EC2_TAG_VALUE repo vars)
       - name: Deploy to EC2 by Tag
         if: ${{ inputs.use_instance_ids != 'true' }}
         run: |
-          set -e
+          set -euo pipefail
           IDS=$(aws ec2 describe-instances \
             --region "${AWS_REGION}" \
             --filters "Name=tag:${{ vars.EC2_TAG_KEY }},Values=${{ vars.EC2_TAG_VALUE }}" "Name=instance-state-name,Values=running" \
             --query "Reservations[].Instances[].InstanceId" --output text)
+
           if [ -z "$IDS" ]; then
-            echo "No running instances found with tag ${{ vars.EC2_TAG_KEY }}=${{ vars.EC2_TAG_VALUE }}"
-            exit 1
+            echo "No running instances found with tag ${{ vars.EC2_TAG_KEY }}=${{ vars.EC2_TAG_VALUE }}"; exit 1
           fi
+
           aws ssm send-command \
             --region "${AWS_REGION}" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy ${IMAGE_URI}@${{ steps.digest.outputs.IMAGE_DIGEST }}" \
+            --comment "Deploy ${IMAGE_URI}@${IMAGE_DIGEST}" \
             --parameters commands='[
-              "set -e",
+              "set -euo pipefail",
               "aws ecr get-login-password --region '"${AWS_REGION}"' | docker login --username AWS --password-stdin '"${AWS_ACCOUNT_ID}"'.dkr.ecr.'"${AWS_REGION}"'.amazonaws.com",
-              "docker pull '"${IMAGE_URI}"'@'${{ steps.digest.outputs.IMAGE_DIGEST }}'",
+              "docker pull '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"'",
               "docker stop opsnow-healthcheck || true",
               "docker rm opsnow-healthcheck || true",
-              "docker run -d --name opsnow-healthcheck --restart unless-stopped '"${IMAGE_URI}"'@'${{ steps.digest.outputs.IMAGE_DIGEST }}' '"${ENTRY_CMD}"'"
+              "docker run -d --name opsnow-healthcheck --restart unless-stopped '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"' '"${ENTRY_CMD}"'"
             ]' \
             --instance-ids $IDS \
             --output text
