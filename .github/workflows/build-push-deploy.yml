@@ -90,9 +90,9 @@ jobs:
       id-token: write
       contents: read
     env:
-      IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}   # includes repo + tag
+      IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}
       IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
-      ENTRY_CMD: ${{ inputs.entry_command }}
+      ENTRY_CMD: ${{ inputs.entry_command || 'python src/global_monitor.py' }}
     steps:
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -102,47 +102,25 @@ jobs:
           audience: sts.amazonaws.com
           output-env-credentials: true
 
-      # Deploy via SSM to explicit instance IDs (preferred)
       - name: Deploy to EC2 by Instance IDs
-        if: ${{ inputs.use_instance_ids == 'true' }}
         run: |
           set -euo pipefail
-          IDS=$(echo "${{ vars.EC2_INSTANCE_IDS }}" | tr -d ' ')
-          if [ -z "$IDS" ]; then echo "EC2_INSTANCE_IDS repo var is empty"; exit 1; fi
 
-          aws ssm send-command \
-            --region "${AWS_REGION}" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy ${IMAGE_URI}@${IMAGE_DIGEST}" \
-            --parameters commands='[
-              "set -euo pipefail",
-              "aws ecr get-login-password --region '"${AWS_REGION}"' | docker login --username AWS --password-stdin '"${AWS_ACCOUNT_ID}"'.dkr.ecr.'"${AWS_REGION}"'.amazonaws.com",
-              "docker pull '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"'",
-              "docker stop opsnow-healthcheck || true",
-              "docker rm opsnow-healthcheck || true",
-              "docker run -d --name opsnow-healthcheck --restart unless-stopped '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"' '"${ENTRY_CMD}"'"
-            ]' \
-            --instance-ids $IDS \
-            --output text
-
-      # Or deploy to all running instances with a specific tag (set EC2_TAG_KEY / EC2_TAG_VALUE repo vars)
-      - name: Deploy to EC2 by Tag
-        if: ${{ inputs.use_instance_ids != 'true' }}
-        run: |
-          set -euo pipefail
-          IDS=$(aws ec2 describe-instances \
-            --region "${AWS_REGION}" \
-            --filters "Name=tag:${{ vars.EC2_TAG_KEY }},Values=${{ vars.EC2_TAG_VALUE }}" "Name=instance-state-name,Values=running" \
-            --query "Reservations[].Instances[].InstanceId" --output text)
-
+          # Expect repo variable EC2_INSTANCE_IDS like:
+          # "i-0123abc,i-0456def" or "i-0123abc i-0456def"
+          RAW="${{ vars.EC2_INSTANCE_IDS }}"
+          IDS=$(echo "$RAW" | tr ',\n' '  ' | xargs)
           if [ -z "$IDS" ]; then
-            echo "No running instances found with tag ${{ vars.EC2_TAG_KEY }}=${{ vars.EC2_TAG_VALUE }}"; exit 1
+            echo "EC2_INSTANCE_IDS repo var is empty (set in Settings → Actions → Variables)"; exit 1
           fi
 
+          SHORT_DIGEST="${IMAGE_DIGEST:7:12}"
+          COMMENT="Deploy opsnow-healthcheck:${IMAGE_URI##*:} (${SHORT_DIGEST})"  # < 100 chars
+
           aws ssm send-command \
             --region "${AWS_REGION}" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy opsnow-healthcheck:${{ needs.build_and_push.outputs.image_tag }}" \
+            --comment "$COMMENT" \
             --parameters commands='[
               "set -euo pipefail",
               "aws ecr get-login-password --region '"${AWS_REGION}"' | docker login --username AWS --password-stdin '"${AWS_ACCOUNT_ID}"'.dkr.ecr.'"${AWS_REGION}"'.amazonaws.com",
