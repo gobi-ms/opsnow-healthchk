@@ -10,7 +10,7 @@ on:
       entry_command:
         description: "Container command (override if needed)"
         required: false
-        default: "python src/healthcheck.py"
+        default: "python src/global_monitor.py"
       use_instance_ids:
         description: "Set to true to use EC2_INSTANCE_IDS var; else uses tag vars"
         required: false
