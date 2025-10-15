@@ -1,0 +1,8 @@
+pandas
+requests
+pyyaml
+python-dotenv
+selenium
+webdriver-manager
+openpyxl
+boto3
