@@ -10,7 +10,7 @@ jobs:
   build-push-deploy:
     runs-on: ubuntu-latest
     # Make sure this matches the environment name under "Settings → Environments"
-    environment: opsnow-healthhcheck
+    environment: opsnow-healthcheck
     permissions:
       id-token: write
       contents: read
@@ -103,3 +103,4 @@ jobs:
             ]' \
             --instance-ids $IDS \
             --output text
+
