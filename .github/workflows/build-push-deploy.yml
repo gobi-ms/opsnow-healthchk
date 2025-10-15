@@ -25,9 +25,9 @@ jobs:
       contents: read
 
     env:
-      AWS_REGION: ${{ vars.AWS_REGION }}             # e.g., us-east-1
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}     # 211125621923
-      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}     # opsnow-healthcheck
+      AWS_REGION: us-east-1
+      AWS_ACCOUNT_ID: 211125621923
+      ECR_REPOSITORY: opsnow-healthcheck
       IMAGE_URI: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}
       IMAGE_TAG: ${{ inputs.image_tag }}
       ENTRY_CMD: ${{ inputs.entry_command }}
