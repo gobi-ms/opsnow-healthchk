@@ -142,7 +142,7 @@ jobs:
           aws ssm send-command \
             --region "${AWS_REGION}" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy ${IMAGE_URI}@${IMAGE_DIGEST}" \
+            --comment "Deploy opsnow-healthcheck:${{ needs.build_and_push.outputs.image_tag }}" \
             --parameters commands='[
               "set -euo pipefail",
               "aws ecr get-login-password --region '"${AWS_REGION}"' | docker login --username AWS --password-stdin '"${AWS_ACCOUNT_ID}"'.dkr.ecr.'"${AWS_REGION}"'.amazonaws.com",
