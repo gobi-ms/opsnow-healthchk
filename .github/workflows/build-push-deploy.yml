@@ -19,6 +19,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: opsnow-healthcheck
     permissions:
       id-token: write
       contents: read
