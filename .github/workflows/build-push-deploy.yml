@@ -1,0 +1,98 @@
+name: Build, Push to ECR, Deploy to EC2
+
+on:
+  push:
+    branches: [ "main" ]
+    paths-ignore: [ "**/*.md" ]
+  workflow_dispatch:
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}                  # us-east-1
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}          # 211125621923
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}          # opsnow-healthcheck
+      IMAGE_TAG: ${{ github.sha }}
+      IMAGE_URI: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS (assume GitHub OIDC role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cicd/docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_URI }}:${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_URI }}:latest
+
+      - name: Get pushed image digest
+        id: describe
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo "IMAGE_DIGEST=${DIGEST}" >> $GITHUB_OUTPUT
+
+      # --- Deploy via SSM to EC2 by Instance IDs (preferred if set) ---
+      - name: Deploy to EC2 by Instance IDs
+        if: ${{ vars.EC2_INSTANCE_IDS != '' }}
+        run: |
+          aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy $IMAGE_URI:${IMAGE_TAG}" \
+            --parameters commands='[
+              "set -e",
+              "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com",
+              "docker pull ${IMAGE_URI}@${{ steps.describe.outputs.IMAGE_DIGEST }}",
+              "docker stop opsnow-healthcheck || true",
+              "docker rm opsnow-healthcheck || true",
+              "docker run -d --name opsnow-healthcheck --restart unless-stopped ${IMAGE_URI}@${{ steps.describe.outputs.IMAGE_DIGEST }} python src/healthcheck.py"
+            ]' \
+            --instance-ids $(echo "${{ vars.EC2_INSTANCE_IDS }}" | tr -d ' ') \
+            --region ${AWS_REGION} \
+            --output text
+
+      # --- Or deploy by tag if you prefer tagging instances (App=opsnow-healthcheck) ---
+      - name: Deploy to EC2 by Tag
+        if: ${{ vars.EC2_INSTANCE_IDS == '' }}
+        run: |
+          IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:${{ vars.EC2_TAG_KEY }},Values=${{ vars.EC2_TAG_VALUE }}" "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].InstanceId" --output text --region ${AWS_REGION})
+          if [ -z "$IDS" ]; then
+            echo "No running instances with tag ${{ vars.EC2_TAG_KEY }}=${{ vars.EC2_TAG_VALUE }}"
+            exit 1
+          fi
+          aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy $IMAGE_URI:${IMAGE_TAG}" \
+            --parameters commands='[
+              "set -e",
+              "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com",
+              "docker pull ${IMAGE_URI}@${{ steps.describe.outputs.IMAGE_DIGEST }}",
+              "docker stop opsnow-healthcheck || true",
+              "docker rm opsnow-healthcheck || true",
+              "docker run -d --name opsnow-healthcheck --restart unless-stopped ${IMAGE_URI}@${{ steps.describe.outputs.IMAGE_DIGEST }} python src/healthcheck.py"
+            ]' \
+            --instance-ids $IDS \
+            --region ${AWS_REGION} \
+            --output text
