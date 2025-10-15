@@ -27,8 +27,8 @@ jobs:
       - name: Configure AWS (assume GitHub OIDC role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: arn:aws:iam::211125621923:role/Opsnow
+          aws-region: us-east-1
           audience: sts.amazonaws.com
           output-env-credentials: true
 
@@ -103,4 +103,5 @@ jobs:
             ]' \
             --instance-ids $IDS \
             --output text
+
 
