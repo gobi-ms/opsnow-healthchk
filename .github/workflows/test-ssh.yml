@@ -6,9 +6,9 @@ jobs:
     steps:
       - uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.EC2_HOST }}   # e.g., 54.166.67.96
+          host: ${{ vars.EC2_HOST }}   # e.g., 54.166.67.96
           username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ vars.EC2_SSH_KEY }}
           script: |
             echo "✅ Connected to $(hostname)"
             whoami && uptime
