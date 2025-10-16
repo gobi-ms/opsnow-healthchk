@@ -118,6 +118,13 @@ jobs:
             sudo docker stop opsnow-healthcheck || true
             sudo docker rm opsnow-healthcheck || true
 
+                  # Only override if ENTRY_CMD is provided (non-empty)
+            if [ -n "${ENTRY_CMD:-}" ]; then
+              RUN_ARGS="${ENTRY_CMD}"
+            else
+              RUN_ARGS=""
+            fi
+
             echo "▶ Run new container"
             sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
               "${IMAGE_URI}@${IMAGE_DIGEST}" ${ENTRY_CMD}
