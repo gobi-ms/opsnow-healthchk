@@ -87,47 +87,38 @@ jobs:
     runs-on: ubuntu-latest
     environment: opsnow-healthcheck
     permissions:
-      id-token: write
       contents: read
     env:
       IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}
       IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
       ENTRY_CMD: ${{ inputs.entry_command || 'python src/global_monitor.py' }}
+
     steps:
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.1.0
         with:
-          role-to-assume: arn:aws:iam::621120073833:role/Opsnow
-          aws-region: ${{ env.AWS_REGION }}
-          audience: sts.amazonaws.com
-          output-env-credentials: true
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -eu
+            echo "Starting Docker service..."
+            sudo systemctl start docker || true
 
-      - name: Deploy to EC2 by Instance IDs
-        run: |
-          set -eu
-          RAW="${{ vars.EC2_INSTANCE_IDS }}"
-          IDS=$(echo "$RAW" | tr ',\n' '  ' | xargs)
-          if [ -z "$IDS" ]; then
-            echo "EC2_INSTANCE_IDS repo var is empty (set in Settings → Actions → Variables)"; exit 1
-          fi
+            echo "Logging in to ECR..."
+            aws ecr get-login-password --region us-east-1 \
+              | sudo docker login --username AWS --password-stdin 621120073833.dkr.ecr.us-east-1.amazonaws.com
 
-          SHORT_DIGEST="${IMAGE_DIGEST:7:12}"
-          COMMENT="Deploy opsnow-healthcheck:${IMAGE_URI##*:} (${SHORT_DIGEST})"
+            echo "Pulling image..."
+            sudo docker pull "${IMAGE_URI}@${IMAGE_DIGEST}"
 
-          aws ssm send-command \
-            --region "${AWS_REGION}" \
-            --document-name "AWS-RunShellScript" \
-            --comment "$COMMENT" \
-            --parameters 'commands=[
-              "#!/bin/bash",
-              "set -eu",
-              "sudo systemctl start docker || true",
-              "aws ecr get-login-password --region '"${AWS_REGION}"' | sudo docker login --username AWS --password-stdin '"${AWS_ACCOUNT_ID}"'.dkr.ecr.'"${AWS_REGION}"'.amazonaws.com",
-              "sudo docker pull '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"'",
-              "sudo docker stop opsnow-healthcheck || true",
-              "sudo docker rm opsnow-healthcheck || true",
-              "sudo docker run -d --name opsnow-healthcheck --restart unless-stopped '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"' ${ENTRY_CMD}",
-              "sudo docker ps -a"
-            ]' \
-            --instance-ids $IDS \
-            --output text
+            echo "Stopping existing container (if any)..."
+            sudo docker stop opsnow-healthcheck || true
+            sudo docker rm opsnow-healthcheck || true
+
+            echo "Starting new container..."
+            sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
+              "${IMAGE_URI}@${IMAGE_DIGEST}" ${ENTRY_CMD}
+
+            echo "Container status:"
+            sudo docker ps
