@@ -1,4 +1,4 @@
-name: Build → Push → Deploy (ECR → EC2 via SSM)
+name: Build → Push → Deploy (ECR → EC2 via SSH)
 
 on:
   push:
@@ -9,10 +9,6 @@ on:
         description: "Container command (override if needed)"
         required: false
         default: "python src/global_monitor.py"
-      use_instance_ids:
-        description: "Set to true to use EC2_INSTANCE_IDS var; else uses tag vars"
-        required: false
-        default: "true"
 
 concurrency:
   group: healthcheck-deploy-${{ github.ref }}
@@ -22,7 +18,6 @@ env:
   AWS_REGION: us-east-1
   AWS_ACCOUNT_ID: 621120073833
   ECR_REPOSITORY: opsnow-healthcheck
-  ENTRY_CMD: ${{ inputs.entry_command }}
 
 jobs:
   build_and_push:
@@ -37,18 +32,17 @@ jobs:
       image_digest: ${{ steps.push.outputs.image_digest }}
 
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Configure AWS (OIDC)
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::621120073833:role/Opsnow
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
-          output-env-credentials: true
 
-      - name: Login to ECR
+      - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
@@ -56,22 +50,19 @@ jobs:
         id: meta
         run: |
           set -eu
-          IMAGE_TAG="${GITHUB_SHA}"               # immutable per commit (or use 'latest')
+          IMAGE_TAG="${GITHUB_SHA}"
           IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-          echo "image_tag=$IMAGE_TAG"   >> "$GITHUB_OUTPUT"
-          echo "image_uri=$IMAGE_URI"   >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
           echo "Using IMAGE_URI=$IMAGE_URI"
 
-      - name: Build and push
+      - name: Build and push Docker image
         id: push
         run: |
           set -euo pipefail
-          docker build \
-          -f cicd/docker/Dockerfile \
-          -t "${{ steps.meta.outputs.image_uri }}" \
-          .
+          docker build -f cicd/docker/Dockerfile -t "${{ steps.meta.outputs.image_uri }}" .
           docker push "${{ steps.meta.outputs.image_uri }}"
-          # Resolve digest after push
+
           DIGEST=$(aws ecr describe-images \
             --repository-name "${ECR_REPOSITORY}" \
             --image-ids imageTag="${{ steps.meta.outputs.image_tag }}" \
@@ -80,7 +71,7 @@ jobs:
             echo "Failed to resolve image digest after push"; exit 1
           fi
           echo "image_digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "Pushed and resolved digest: $DIGEST"
+          echo "Pushed image digest: $DIGEST"
 
   deploy:
     needs: build_and_push
@@ -94,31 +85,51 @@ jobs:
       ENTRY_CMD: ${{ inputs.entry_command || 'python src/global_monitor.py' }}
 
     steps:
+      - name: Assert required secrets exist
+        run: |
+          [ -n "${{ secrets.EC2_HOST }}" ] || { echo "❌ Missing EC2_HOST secret"; exit 1; }
+          [ -n "${{ secrets.EC2_SSH_KEY }}" ] || { echo "❌ Missing EC2_SSH_KEY secret"; exit 1; }
+
       - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.EC2_HOST }}   # e.g., 54.166.xx.xx
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -eu
+            echo "🚀 Starting deployment on EC2..."
+
+            echo "▶ Starting Docker"
+            sudo systemctl start docker || true
+
+            echo "▶ Docker info"
+            sudo docker info | sed -n '1,40p' || true
+
+            echo "▶ Login to ECR"
+            aws ecr get-login-password --region us-east-1 \
+              | sudo docker login --username AWS --password-stdin 621120073833.dkr.ecr.us-east-1.amazonaws.com
+
+            echo "▶ Pull image by digest"
+            sudo docker pull "${IMAGE_URI}@${IMAGE_DIGEST}"
+
+            echo "▶ Stop & remove old container"
+            sudo docker stop opsnow-healthcheck || true
+            sudo docker rm opsnow-healthcheck || true
+
+            echo "▶ Run new container"
+            sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
+              "${IMAGE_URI}@${IMAGE_DIGEST}" ${ENTRY_CMD}
+
+            echo "▶ Containers:"
+            sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+
+      - name: Verify container health (logs tail)
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -eu
-            echo "Starting Docker service..."
-            sudo systemctl start docker || true
-
-            echo "Logging in to ECR..."
-            aws ecr get-login-password --region us-east-1 \
-              | sudo docker login --username AWS --password-stdin 621120073833.dkr.ecr.us-east-1.amazonaws.com
-
-            echo "Pulling image..."
-            sudo docker pull "${IMAGE_URI}@${IMAGE_DIGEST}"
-
-            echo "Stopping existing container (if any)..."
-            sudo docker stop opsnow-healthcheck || true
-            sudo docker rm opsnow-healthcheck || true
-
-            echo "Starting new container..."
-            sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
-              "${IMAGE_URI}@${IMAGE_DIGEST}" ${ENTRY_CMD}
-
-            echo "Container status:"
-            sudo docker ps
+            echo "🩺 Last 50 log lines:"
+            sudo docker logs --tail 50 opsnow-healthcheck || true
