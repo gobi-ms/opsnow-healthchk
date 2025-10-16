@@ -1,17 +1,14 @@
-name: Test SSH Key
-on:
-  workflow_dispatch:
-
+name: Test SSH
+on: { workflow_dispatch: {} }
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Test EC2 SSH Connection
-        uses: appleboy/ssh-action@v1.1.0
+      - uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.EC2_HOST }}
+          host: ${{ secrets.EC2_HOST }}   # e.g., 54.166.67.96
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo "✅ Connected successfully to $(hostname)"
-            uptime
+            echo "✅ Connected to $(hostname)"
+            whoami && uptime
