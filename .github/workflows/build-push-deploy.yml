@@ -96,6 +96,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}   # e.g., 54.166.xx.xx
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE_URI,IMAGE_DIGEST,ENTRY_CMD,AWS_REGION,AWS_ACCOUNT_ID
           script: |
             set -eu
             echo "🚀 Starting deployment on EC2..."
