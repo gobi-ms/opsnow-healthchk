@@ -97,7 +97,7 @@ jobs:
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::211125621923:role/Opsnow
+          role-to-assume: arn:aws:iam::621120073833:role/Opsnow
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
           output-env-credentials: true
