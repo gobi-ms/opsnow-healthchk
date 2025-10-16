@@ -1,14 +1,23 @@
 name: Test SSH
-on: { workflow_dispatch: {} }
+on:
+  workflow_dispatch:
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    environment: opsnow-healthcheck   # <-- critical so env-scoped secrets are available
     steps:
-      - uses: appleboy/ssh-action@v1.1.0
+      - name: Assert secrets exist
+        run: |
+          [ -n "${{ secrets.EC2_HOST }}" ] || { echo "EC2_HOST secret missing"; exit 1; }
+          [ -n "${{ secrets.EC2_SSH_KEY }}" ] || { echo "EC2_SSH_KEY secret missing"; exit 1; }
+
+      - name: Test EC2 SSH
+        uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.EC2_HOST }}   # e.g., 54.166.67.96
+          host: ${{ secrets.EC2_HOST }}     # not vars.*
           username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ secrets.EC2_SSH_KEY }}   # not vars.*
           script: |
             echo "✅ Connected to $(hostname)"
             whoami && uptime
