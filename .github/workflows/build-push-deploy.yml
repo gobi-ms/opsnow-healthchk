@@ -104,10 +104,7 @@ jobs:
 
       - name: Deploy to EC2 by Instance IDs
         run: |
-          set -euo pipefail
-
-          # Expect repo variable EC2_INSTANCE_IDS like:
-          # "i-0123abc,i-0456def" or "i-0123abc i-0456def"
+          set -eu
           RAW="${{ vars.EC2_INSTANCE_IDS }}"
           IDS=$(echo "$RAW" | tr ',\n' '  ' | xargs)
           if [ -z "$IDS" ]; then
@@ -115,19 +112,22 @@ jobs:
           fi
 
           SHORT_DIGEST="${IMAGE_DIGEST:7:12}"
-          COMMENT="Deploy opsnow-healthcheck:${IMAGE_URI##*:} (${SHORT_DIGEST})"  # < 100 chars
+          COMMENT="Deploy opsnow-healthcheck:${IMAGE_URI##*:} (${SHORT_DIGEST})"
 
           aws ssm send-command \
             --region "${AWS_REGION}" \
             --document-name "AWS-RunShellScript" \
             --comment "$COMMENT" \
-            --parameters commands='[
-              "set -euo pipefail",
-              "aws ecr get-login-password --region '"${AWS_REGION}"' | docker login --username AWS --password-stdin '"${AWS_ACCOUNT_ID}"'.dkr.ecr.'"${AWS_REGION}"'.amazonaws.com",
-              "docker pull '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"'",
-              "docker stop opsnow-healthcheck || true",
-              "docker rm opsnow-healthcheck || true",
-              "docker run -d --name opsnow-healthcheck --restart unless-stopped '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"'"
+            --parameters 'commands=[
+              "#!/bin/bash",
+              "set -eu",
+              "sudo systemctl start docker || true",
+              "aws ecr get-login-password --region '"${AWS_REGION}"' | sudo docker login --username AWS --password-stdin '"${AWS_ACCOUNT_ID}"'.dkr.ecr.'"${AWS_REGION}"'.amazonaws.com",
+              "sudo docker pull '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"'",
+              "sudo docker stop opsnow-healthcheck || true",
+              "sudo docker rm opsnow-healthcheck || true",
+              "sudo docker run -d --name opsnow-healthcheck --restart unless-stopped '"${IMAGE_URI}"'@'"${IMAGE_DIGEST}"' ${ENTRY_CMD}",
+              "sudo docker ps -a"
             ]' \
             --instance-ids $IDS \
             --output text
