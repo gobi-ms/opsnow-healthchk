@@ -16,8 +16,8 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
-  AWS_ACCOUNT_ID: 621120073833
-  ECR_REPOSITORY: opsnow-healthcheck
+  AWS_ACCOUNT_ID: 900335273390
+  ECR_REPOSITORY: qa-an2p-health-check-ecr
 
 jobs:
   build_and_push:
@@ -38,7 +38,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::621120073833:role/Opsnow
+          role-to-assume: arn:aws:iam::900335273390:role/GithubDeployRole
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
