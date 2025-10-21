@@ -88,7 +88,7 @@ jobs:
       IMAGE_NAME: ${{ needs.build_and_push.outputs.image_name }}   # registry/repo (no tag)
       IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
       # Use github.event.inputs so workflow_dispatch inputs work, and push events fall back to default
-      ENTRY_CMD: ${{ github.event.inputs.entry_command || 'python src/global_monitor.py' }}
+      ENTRY_CMD: ${{ github.event.inputs.entry_command || 'python global_monitor.py' }}
       # Hard-code these here to avoid parser ambiguity:
       AWS_REGION: us-east-1
       AWS_ACCOUNT_ID: 900335273390
@@ -155,7 +155,7 @@ jobs:
 
             echo "▶ Run new container (detached) with command: ${CMD_TO_RUN}"
             sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
-              "${IMAGE_REF}" 
+              "${IMAGE_REF}" ${CMD_TO_RUN}
 
             echo "▶ Containers:"
             sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
