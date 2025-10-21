@@ -34,6 +34,28 @@ from openpyxl.styles import PatternFill
 
 load_dotenv()
 
+def load_secrets_from_aws():
+    """Fetch credentials from AWS Secrets Manager if not already set in env."""
+    secret_name = "qa/an2p/healthcheck/login_credentials"
+    region_name = "us-east-1"
+    try:
+        # Initialize AWS Secrets Manager client
+        client = boto3.client("secretsmanager", region_name=region_name)
+        get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+        secret_dict = json.loads(get_secret_value_response["SecretString"])
+
+        # Populate environment variables only if not already present
+        for key, value in secret_dict.items():
+            os.environ.setdefault(key, value)
+
+        print("✅ Loaded credentials from AWS Secrets Manager")
+    except Exception as e:
+        print(f"⚠️ Could not load secrets from AWS Secrets Manager: {e}")
+
+# Call this before reading env vars
+load_secrets_from_aws()
+# --- 👆 End new block 👆 ---
+
 def env_bool(name: str, default=False) -> bool:
     v = os.getenv(name, str(default)).strip().lower()
     return v in ("1", "true", "yes", "y", "on")
@@ -910,3 +932,4 @@ if __name__ == "__main__":
                 shutil.rmtree(TEMP_PROFILE_DIR, ignore_errors=True)
         except Exception:
             pass
+
