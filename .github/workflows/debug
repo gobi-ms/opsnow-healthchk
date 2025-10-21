@@ -1,0 +1,15 @@
+- name: Debug DNS & port 22
+  run: |
+    sudo apt-get update -y && sudo apt-get install -y dnsutils netcat-openbsd curl || true
+    HOST="${{ secrets.EC2_HOST }}"
+    echo "HOST: $HOST"
+    echo "nslookup:"
+    nslookup "$HOST" || true
+    echo "dig +short:"
+    dig +short "$HOST" || true
+    echo "getent hosts:"
+    getent hosts "$HOST" || true
+    echo "curl to asset (checks runner DNS):"
+    curl -I https://github.com/appleboy/drone-ssh/releases/download/v1.7.7/drone-ssh-1.7.7-linux-amd64 || true
+    echo "tcp test to port 22 (timeout 5s):"
+    timeout 5 bash -c "cat < /dev/null > /dev/tcp/${HOST}/22" && echo "port22 reachable" || echo "port22 not reachable"
