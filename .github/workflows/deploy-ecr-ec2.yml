@@ -153,9 +153,9 @@ jobs:
               CMD_TO_RUN=""
             fi
 
-            echo "▶ Run new container (detached) with command: ${CMD_TO_RUN}"
+            echo "▶ Run new container (detached) using image CMD"
             sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
-              "${IMAGE_REF}" ${CMD_TO_RUN}
+              "${IMAGE_REF}"
 
             echo "▶ Containers:"
             sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
