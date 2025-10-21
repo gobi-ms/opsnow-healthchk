@@ -115,7 +115,7 @@ jobs:
             echo "▶ docker info (head)"
             sudo docker info | sed -n '1,40p' || true
 
-            # === Ensure aws CLI exists; install if missing ===
+            # === Ensure aws CLI exists; install if missing =====
             if ! command -v aws >/dev/null 2>&1; then
               echo "▶ aws CLI not found — installing AWS CLI v2"
               sudo apt-get update -y
