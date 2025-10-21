@@ -29,7 +29,6 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
       image_uri: ${{ steps.meta.outputs.image_uri }}
-      image_name: ${{ steps.meta.outputs.image_name }}
       image_digest: ${{ steps.push.outputs.image_digest }}
 
     steps:
@@ -39,7 +38,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/GithubDeployRole
+          role-to-assume: arn:aws:iam::900335273390:role/GithubDeployRole
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
@@ -52,14 +51,10 @@ jobs:
         run: |
           set -eu
           IMAGE_TAG="${GITHUB_SHA}"
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          IMAGE_NAME="${REGISTRY}/${ECR_REPOSITORY}"        # registry/repo (no tag)
-          IMAGE_URI="${IMAGE_NAME}:${IMAGE_TAG}"           # registry/repo:tag
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
           echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
-          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
           echo "Using IMAGE_URI=$IMAGE_URI"
-          echo "Using IMAGE_NAME=$IMAGE_NAME"
 
       - name: Build and push Docker image
         id: push
@@ -68,7 +63,6 @@ jobs:
           docker build -f cicd/docker/Dockerfile -t "${{ steps.meta.outputs.image_uri }}" .
           docker push "${{ steps.meta.outputs.image_uri }}"
 
-          # Get the pushed image digest (by tag)
           DIGEST=$(aws ecr describe-images \
             --repository-name "${ECR_REPOSITORY}" \
             --image-ids imageTag="${{ steps.meta.outputs.image_tag }}" \
@@ -86,11 +80,9 @@ jobs:
     permissions:
       contents: read
     env:
-      IMAGE_NAME: ${{ needs.build_and_push.outputs.image_name }}   # registry/repo (no tag)
+      IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}
       IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
       ENTRY_CMD: ${{ inputs.entry_command || 'python src/global_monitor.py' }}
-      AWS_REGION: ${{ env.AWS_REGION }}
-      AWS_ACCOUNT_ID: ${{ env.AWS_ACCOUNT_ID }}
 
     steps:
       - name: Assert required secrets exist
@@ -101,50 +93,46 @@ jobs:
       - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.EC2_HOST }}
+          host: ${{ secrets.EC2_HOST }}   # e.g., 54.166.xx.xx
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: IMAGE_NAME,IMAGE_DIGEST,ENTRY_CMD,AWS_REGION,AWS_ACCOUNT_ID
+          envs: IMAGE_URI,IMAGE_DIGEST,ENTRY_CMD,AWS_REGION,AWS_ACCOUNT_ID
           script: |
-            set -euxo pipefail
-            echo "🚀 Starting deployment on $(hostname) at $(date)"
+            set -eu
+            echo "🚀 Starting deployment on EC2..."
 
-            echo "▶ Ensure docker is running"
+            echo "▶ Starting Docker"
             sudo systemctl start docker || true
 
-            echo "▶ docker info (head)"
+            echo "▶ Docker info"
             sudo docker info | sed -n '1,40p' || true
 
-            echo "▶ Login to ECR using registry from AWS_ACCOUNT_ID and region"
-            REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-            echo "Using registry: ${REGISTRY}"
-            aws ecr get-login-password --region "${AWS_REGION}" \
-              | sudo docker login --username AWS --password-stdin "${REGISTRY}"
+            echo "▶ Login to ECR"
+            aws ecr get-login-password --region us-east-1 \
+              | sudo docker login --username AWS --password-stdin 621120073833.dkr.ecr.us-east-1.amazonaws.com
 
-            # Pull the image by digest (use IMAGE_NAME@DIGEST)
-            IMAGE_REF="${IMAGE_NAME}@${IMAGE_DIGEST}"
-            echo "▶ Pull image: ${IMAGE_REF}"
-            sudo docker pull "${IMAGE_REF}"
+            echo "▶ Pull image by digest"
+            sudo docker pull "${IMAGE_URI}@${IMAGE_DIGEST}"
 
-            echo "▶ Stop & remove old container (if any)"
+            echo "▶ Stop & remove old container"
             sudo docker stop opsnow-healthcheck || true
             sudo docker rm opsnow-healthcheck || true
 
-            # Decide run arguments
+                  # Only override if ENTRY_CMD is provided (non-empty)
             if [ -n "${ENTRY_CMD:-}" ]; then
-              CMD_TO_RUN="${ENTRY_CMD}"
+              RUN_ARGS="${ENTRY_CMD}"
             else
-              CMD_TO_RUN=""
+              RUN_ARGS=""
             fi
 
-            echo "▶ Run new container (detached)"
+            echo "▶ Run new container"
             sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
-              "${IMAGE_REF}" ${CMD_TO_RUN}
+              "${IMAGE_URI}@${IMAGE_DIGEST}" ${ENTRY_CMD}
 
             echo "▶ Containers:"
             sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 
-      - name: Verify container health (logs tail + optional HTTP check)
+      - name: Verify container health (logs tail)
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -153,10 +141,3 @@ jobs:
           script: |
             echo "🩺 Last 50 log lines:"
             sudo docker logs --tail 50 opsnow-healthcheck || true
-
-            # Optional: quick internal curl health check (adjust URL/port for your app)
-            # If your container exposes a port locally, you can curl it from the instance:
-            if command -v curl >/dev/null 2>&1; then
-              echo "🔍 Health endpoint test (http://localhost:8000/health):"
-              curl -f http://localhost:8000/health && echo "health OK" || echo "health endpoint failed or not present"
-            fi
