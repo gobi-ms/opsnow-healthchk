@@ -140,6 +140,11 @@ jobs:
             aws ecr get-login-password --region "${AWS_REGION}" \
               | sudo docker login --username AWS --password-stdin "${REGISTRY}"
 
+            echo "🧹 Cleaning up old Docker data before pull"
+            sudo docker system prune -af || true
+            sudo docker volume prune -f || true
+            df -h || true
+
             IMAGE_REF="${IMAGE_NAME}@${IMAGE_DIGEST}"
             echo "▶ Pull image: ${IMAGE_REF}"
             sudo docker pull "${IMAGE_REF}"
