@@ -1,0 +1,122 @@
+name: Test SSH (DNS + Connectivity Checks)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    environment: opsnow-healthcheck   # environment-scoped secrets available here
+    steps:
+      - name: Assert required secrets exist
+        run: |
+          [ -n "${{ secrets.EC2_HOST }}" ] || { echo "EC2_HOST secret missing"; exit 1; }
+          [ -n "${{ secrets.EC2_SSH_KEY }}" ] || { echo "EC2_SSH_KEY secret missing"; exit 1; }
+          echo "Secrets present"
+
+      - name: Install debug tools
+        run: sudo apt-get update -y && sudo apt-get install -y dnsutils iputils-ping curl netcat-openbsd jq || true
+
+      - name: Resolve & test host (DNS, dig, TCP port 22) and choose fallback IP
+        id: netcheck
+        run: |
+          set -euo pipefail
+          HOST="${{ secrets.EC2_HOST }}"
+          FALLBACK_IP="${{ secrets.EC2_IP || '' }}"
+          echo "Original host secret: $HOST"
+          echo "Fallback IP secret present: ${FALLBACK_IP:+yes}"
+
+          # Try DNS resolution (nslookup) with a few retries for transient issues
+          RESOLVED=false
+          for i in 1 2 3 4 5; do
+            echo "DNS attempt $i for $HOST"
+            if nslookup "$HOST" >/tmp/nslookup.out 2>&1; then
+              if grep -q 'Address\|Non-authoritative answer' /tmp/nslookup.out || [ -s /tmp/nslookup.out ]; then
+                RESOLVED=true
+                break
+              fi
+            fi
+            sleep 3
+          done
+          echo "resolved=$RESOLVED"
+
+          if [ "$RESOLVED" = "true" ]; then
+            CHOSEN_HOST="$HOST"
+            USING_FALLBACK=false
+          else
+            if [ -n "$FALLBACK_IP" ]; then
+              CHOSEN_HOST="$FALLBACK_IP"
+              USING_FALLBACK=true
+            else
+              CHOSEN_HOST="$HOST"
+              USING_FALLBACK=false
+            fi
+          fi
+
+          echo "Chosen host for connectivity test: $CHOSEN_HOST (using_fallback=$USING_FALLBACK)"
+
+          # Show DNS information (if resolved)
+          if [ "$RESOLVED" = "true" ]; then
+            echo "dig +short $HOST:"
+            dig +short "$HOST" || true
+            echo "getent hosts $HOST:"
+            getent hosts "$HOST" || true
+          fi
+
+          # Test download DNS resolution (checks runner DNS to github)
+          echo "curl check for release asset (runner DNS):"
+          curl -I -sS https://github.com/appleboy/drone-ssh/releases/download/v1.7.7/drone-ssh-1.7.7-linux-amd64 || true
+
+          # Quick TCP test to port 22 (5s timeout)
+          TCP_OK=false
+          if timeout 5 bash -c "cat < /dev/null > /dev/tcp/${CHOSEN_HOST}/22" 2>/dev/null; then
+            TCP_OK=true
+          fi
+          echo "tcp22=$TCP_OK"
+
+          # Decide if job should proceed: allow proceed if TCP is reachable OR fallback IP is used
+          CAN_CONNECT=false
+          if [ "$TCP_OK" = "true" ] || [ "$USING_FALLBACK" = "true" ]; then
+            CAN_CONNECT=true
+          fi
+
+          # Export outputs (modern method)
+          {
+            echo "resolved=${RESOLVED}"
+            echo "host=${CHOSEN_HOST}"
+            echo "using_fallback=${USING_FALLBACK}"
+            echo "tcp22=${TCP_OK}"
+            echo "can_connect=${CAN_CONNECT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Show netcheck outputs
+        run: |
+          echo "resolved: ${{ steps.netcheck.outputs.resolved }}"
+          echo "host chosen: ${{ steps.netcheck.outputs.host }}"
+          echo "using fallback: ${{ steps.netcheck.outputs.using_fallback }}"
+          echo "tcp22 reachable: ${{ steps.netcheck.outputs.tcp22 }}"
+          echo "can_connect: ${{ steps.netcheck.outputs.can_connect }}"
+
+      - name: Deploy to EC2 via SSH (only if reachable)
+        if: ${{ steps.netcheck.outputs.can_connect == 'true' }}
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.netcheck.outputs.host }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          timeout: 30s
+          script: |
+            echo "✅ Connected to $(hostname)"
+            whoami && uptime
+
+      - name: Fail early with helpful message when unreachable
+        if: ${{ steps.netcheck.outputs.can_connect != 'true' }}
+        run: |
+          echo "Host is not reachable from GitHub runner."
+          echo "DNS resolved: ${{ steps.netcheck.outputs.resolved }}"
+          echo "Tried host: ${{ steps.netcheck.outputs.host }}"
+          echo "TCP port 22 reachable: ${{ steps.netcheck.outputs.tcp22 }}"
+          echo ""
+          echo "If host is private (inside a VPC) use a self-hosted runner inside that VPC or provide a public IP in secret EC2_IP."
+          exit 1
