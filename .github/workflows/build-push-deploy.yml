@@ -29,6 +29,7 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
       image_uri: ${{ steps.meta.outputs.image_uri }}
+      image_name: ${{ steps.meta.outputs.image_name }}
       image_digest: ${{ steps.push.outputs.image_digest }}
 
     steps:
@@ -38,7 +39,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::900335273390:role/GithubDeployRole
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/GithubDeployRole
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
@@ -51,10 +52,14 @@ jobs:
         run: |
           set -eu
           IMAGE_TAG="${GITHUB_SHA}"
-          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_NAME="${REGISTRY}/${ECR_REPOSITORY}"
+          IMAGE_URI="${IMAGE_NAME}:${IMAGE_TAG}"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
           echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
           echo "Using IMAGE_URI=$IMAGE_URI"
+          echo "Using IMAGE_NAME=$IMAGE_NAME"
 
       - name: Build and push Docker image
         id: push
@@ -80,9 +85,11 @@ jobs:
     permissions:
       contents: read
     env:
-      IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}
+      IMAGE_NAME: ${{ needs.build_and_push.outputs.image_name }}   # registry/repo (no tag)
       IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
       ENTRY_CMD: ${{ inputs.entry_command || 'python src/global_monitor.py' }}
+      AWS_REGION: ${{ env.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ env.AWS_ACCOUNT_ID }}
 
     steps:
       - name: Assert required secrets exist
@@ -90,54 +97,87 @@ jobs:
           [ -n "${{ secrets.EC2_HOST }}" ] || { echo "❌ Missing EC2_HOST secret"; exit 1; }
           [ -n "${{ secrets.EC2_SSH_KEY }}" ] || { echo "❌ Missing EC2_SSH_KEY secret"; exit 1; }
 
-      - name: Deploy to EC2 via SSH
+      - name: Deploy to EC2 via SSH (with aws-cli install if missing)
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.EC2_HOST }}   # e.g., 54.166.xx.xx
+          host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: IMAGE_URI,IMAGE_DIGEST,ENTRY_CMD,AWS_REGION,AWS_ACCOUNT_ID
+          envs: IMAGE_NAME,IMAGE_DIGEST,ENTRY_CMD,AWS_REGION,AWS_ACCOUNT_ID
           script: |
-            set -eu
-            echo "🚀 Starting deployment on EC2..."
+            set -euxo pipefail
+            echo "🚀 Starting deployment on $(hostname) at $(date)"
 
-            echo "▶ Starting Docker"
+            # === Ensure docker running ===
+            echo "▶ Ensure docker is running"
             sudo systemctl start docker || true
 
-            echo "▶ Docker info"
+            echo "▶ docker info (head)"
             sudo docker info | sed -n '1,40p' || true
 
-            echo "▶ Login to ECR"
-            aws ecr get-login-password --region us-east-1 \
-              | sudo docker login --username AWS --password-stdin 621120073833.dkr.ecr.us-east-1.amazonaws.com
+            # === Ensure aws CLI exists; install if missing ===
+            if ! command -v aws >/dev/null 2>&1; then
+              echo "▶ aws CLI not found — installing AWS CLI v2"
+              sudo apt-get update -y
+              sudo apt-get install -y unzip curl || true
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+              unzip -o /tmp/awscliv2.zip -d /tmp
+              sudo /tmp/aws/install -i /usr/local/aws-cli -b /usr/local/bin || {
+                echo "AWS CLI install failed"; exit 1
+              }
+              rm -rf /tmp/aws /tmp/awscliv2.zip
+            else
+              echo "▶ aws CLI already installed: $(aws --version 2>&1 | cut -d' ' -f1-2)"
+            fi
 
-            echo "▶ Pull image by digest"
-            sudo docker pull "${IMAGE_URI}@${IMAGE_DIGEST}"
+            # Check that AWS credentials are available on the instance (instance profile preferred)
+            if ! aws sts get-caller-identity --output text >/dev/null 2>&1; then
+              echo "⚠️ aws CLI cannot find credentials on the instance. Ensure the EC2 instance has an IAM role with ECR permissions."
+              # you may still attempt login if you have other auth configured, but warn and continue to fail loudly on docker login
+            fi
 
-            echo "▶ Stop & remove old container"
+            # === Docker login to ECR ===
+            REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            echo "▶ Logging into ECR registry: ${REGISTRY}"
+            aws ecr get-login-password --region "${AWS_REGION}" \
+              | sudo docker login --username AWS --password-stdin "${REGISTRY}"
+
+            # === Pull by digest and run ===
+            IMAGE_REF="${IMAGE_NAME}@${IMAGE_DIGEST}"
+            echo "▶ Pull image: ${IMAGE_REF}"
+            sudo docker pull "${IMAGE_REF}"
+
+            echo "▶ Stop & remove old container (if any)"
             sudo docker stop opsnow-healthcheck || true
             sudo docker rm opsnow-healthcheck || true
 
-                  # Only override if ENTRY_CMD is provided (non-empty)
+            # Decide run arguments
             if [ -n "${ENTRY_CMD:-}" ]; then
-              RUN_ARGS="${ENTRY_CMD}"
+              CMD_TO_RUN="${ENTRY_CMD}"
             else
-              RUN_ARGS=""
+              CMD_TO_RUN=""
             fi
 
-            echo "▶ Run new container"
+            echo "▶ Run new container (detached) with command: ${CMD_TO_RUN}"
             sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
-              "${IMAGE_URI}@${IMAGE_DIGEST}" ${ENTRY_CMD}
+              "${IMAGE_REF}" ${CMD_TO_RUN}
 
             echo "▶ Containers:"
             sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 
-      - name: Verify container health (logs tail)
+      - name: Verify container health (logs tail + optional HTTP check)
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            set -eux
             echo "🩺 Last 50 log lines:"
             sudo docker logs --tail 50 opsnow-healthcheck || true
+
+            # Optional: quick internal curl health check (adjust URL/port for your app)
+            if command -v curl >/dev/null 2>&1; then
+              echo "🔍 Health endpoint test (http://localhost:8000/health):"
+              curl -f http://localhost:8000/health && echo "health OK" || echo "health endpoint failed or not present"
+            fi
