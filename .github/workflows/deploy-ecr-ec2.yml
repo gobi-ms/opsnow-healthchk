@@ -160,7 +160,8 @@ jobs:
 
             echo "▶ Run new container (detached) using image CMD"
             sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
-              "${IMAGE_REF}"
+            -p 8000:8000 \
+            "${IMAGE_REF}" sh -lc "python src/global_monitor.py"
 
             echo "▶ Containers:"
             sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
@@ -174,7 +175,8 @@ jobs:
           script: |
             set -eux
             echo "🩺 Last 50 log lines:"
-            sudo docker logs --tail 50 opsnow-healthcheck || true
+            sudo docker logs --tail 50 opsnow-healthcheck
+            sudo docker exec -it opsnow-healthcheck ps aux
 
             if command -v curl >/dev/null 2>&1; then
               echo "🔍 Health endpoint test (http://localhost:8000/health):"
