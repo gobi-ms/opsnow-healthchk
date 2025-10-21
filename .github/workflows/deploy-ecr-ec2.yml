@@ -87,9 +87,11 @@ jobs:
     env:
       IMAGE_NAME: ${{ needs.build_and_push.outputs.image_name }}   # registry/repo (no tag)
       IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
-      ENTRY_CMD: ${{ inputs.entry_command || 'python src/global_monitor.py' }}
-      AWS_REGION: ${{ env.AWS_REGION }}
-      AWS_ACCOUNT_ID: ${{ env.AWS_ACCOUNT_ID }}
+      # Use github.event.inputs so workflow_dispatch inputs work, and push events fall back to default
+      ENTRY_CMD: ${{ github.event.inputs.entry_command || 'python src/global_monitor.py' }}
+      # Hard-code these here to avoid parser ambiguity:
+      AWS_REGION: us-east-1
+      AWS_ACCOUNT_ID: 900335273390
 
     steps:
       - name: Assert required secrets exist
@@ -108,14 +110,11 @@ jobs:
             set -euxo pipefail
             echo "🚀 Starting deployment on $(hostname) at $(date)"
 
-            # === Ensure docker running ===
-            echo "▶ Ensure docker is running"
+            # Ensure docker running
             sudo systemctl start docker || true
-
-            echo "▶ docker info (head)"
             sudo docker info | sed -n '1,40p' || true
 
-            # === Ensure aws CLI exists; install if missing ===
+            # Ensure aws CLI exists; install if missing
             if ! command -v aws >/dev/null 2>&1; then
               echo "▶ aws CLI not found — installing AWS CLI v2"
               sudo apt-get update -y
@@ -133,25 +132,21 @@ jobs:
             # Check that AWS credentials are available on the instance (instance profile preferred)
             if ! aws sts get-caller-identity --output text >/dev/null 2>&1; then
               echo "⚠️ aws CLI cannot find credentials on the instance. Ensure the EC2 instance has an IAM role with ECR permissions."
-              # you may still attempt login if you have other auth configured, but warn and continue to fail loudly on docker login
             fi
 
-            # === Docker login to ECR ===
+            # Docker login to ECR
             REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
             echo "▶ Logging into ECR registry: ${REGISTRY}"
             aws ecr get-login-password --region "${AWS_REGION}" \
               | sudo docker login --username AWS --password-stdin "${REGISTRY}"
 
-            # === Pull by digest and run ===
             IMAGE_REF="${IMAGE_NAME}@${IMAGE_DIGEST}"
             echo "▶ Pull image: ${IMAGE_REF}"
             sudo docker pull "${IMAGE_REF}"
 
-            echo "▶ Stop & remove old container (if any)"
             sudo docker stop opsnow-healthcheck || true
             sudo docker rm opsnow-healthcheck || true
 
-            # Decide run arguments
             if [ -n "${ENTRY_CMD:-}" ]; then
               CMD_TO_RUN="${ENTRY_CMD}"
             else
@@ -176,7 +171,6 @@ jobs:
             echo "🩺 Last 50 log lines:"
             sudo docker logs --tail 50 opsnow-healthcheck || true
 
-            # Optional: quick internal curl health check (adjust URL/port for your app)
             if command -v curl >/dev/null 2>&1; then
               echo "🔍 Health endpoint test (http://localhost:8000/health):"
               curl -f http://localhost:8000/health && echo "health OK" || echo "health endpoint failed or not present"
