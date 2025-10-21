@@ -1,0 +1,162 @@
+name: Build → Push → Deploy (ECR → EC2 via SSH)
+
+on:
+  push:
+    branches: [ main, dev ]
+  workflow_dispatch:
+    inputs:
+      entry_command:
+        description: "Container command (override if needed)"
+        required: false
+        default: "python src/global_monitor.py"
+
+concurrency:
+  group: healthcheck-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: 900335273390
+  ECR_REPOSITORY: qa-an2p-health-check-ecr
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    environment: opsnow-healthcheck
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+      image_name: ${{ steps.meta.outputs.image_name }}
+      image_digest: ${{ steps.push.outputs.image_digest }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/GithubDeployRole
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          set -eu
+          IMAGE_TAG="${GITHUB_SHA}"
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_NAME="${REGISTRY}/${ECR_REPOSITORY}"        # registry/repo (no tag)
+          IMAGE_URI="${IMAGE_NAME}:${IMAGE_TAG}"           # registry/repo:tag
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "Using IMAGE_URI=$IMAGE_URI"
+          echo "Using IMAGE_NAME=$IMAGE_NAME"
+
+      - name: Build and push Docker image
+        id: push
+        run: |
+          set -euo pipefail
+          docker build -f cicd/docker/Dockerfile -t "${{ steps.meta.outputs.image_uri }}" .
+          docker push "${{ steps.meta.outputs.image_uri }}"
+
+          # Get the pushed image digest (by tag)
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-ids imageTag="${{ steps.meta.outputs.image_tag }}" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "Failed to resolve image digest after push"; exit 1
+          fi
+          echo "image_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Pushed image digest: $DIGEST"
+
+  deploy:
+    needs: build_and_push
+    runs-on: ubuntu-latest
+    environment: opsnow-healthcheck
+    permissions:
+      contents: read
+    env:
+      IMAGE_NAME: ${{ needs.build_and_push.outputs.image_name }}   # registry/repo (no tag)
+      IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
+      ENTRY_CMD: ${{ inputs.entry_command || 'python src/global_monitor.py' }}
+      AWS_REGION: ${{ env.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ env.AWS_ACCOUNT_ID }}
+
+    steps:
+      - name: Assert required secrets exist
+        run: |
+          [ -n "${{ secrets.EC2_HOST }}" ] || { echo "❌ Missing EC2_HOST secret"; exit 1; }
+          [ -n "${{ secrets.EC2_SSH_KEY }}" ] || { echo "❌ Missing EC2_SSH_KEY secret"; exit 1; }
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE_NAME,IMAGE_DIGEST,ENTRY_CMD,AWS_REGION,AWS_ACCOUNT_ID
+          script: |
+            set -euxo pipefail
+            echo "🚀 Starting deployment on $(hostname) at $(date)"
+
+            echo "▶ Ensure docker is running"
+            sudo systemctl start docker || true
+
+            echo "▶ docker info (head)"
+            sudo docker info | sed -n '1,40p' || true
+
+            echo "▶ Login to ECR using registry from AWS_ACCOUNT_ID and region"
+            REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            echo "Using registry: ${REGISTRY}"
+            aws ecr get-login-password --region "${AWS_REGION}" \
+              | sudo docker login --username AWS --password-stdin "${REGISTRY}"
+
+            # Pull the image by digest (use IMAGE_NAME@DIGEST)
+            IMAGE_REF="${IMAGE_NAME}@${IMAGE_DIGEST}"
+            echo "▶ Pull image: ${IMAGE_REF}"
+            sudo docker pull "${IMAGE_REF}"
+
+            echo "▶ Stop & remove old container (if any)"
+            sudo docker stop opsnow-healthcheck || true
+            sudo docker rm opsnow-healthcheck || true
+
+            # Decide run arguments
+            if [ -n "${ENTRY_CMD:-}" ]; then
+              CMD_TO_RUN="${ENTRY_CMD}"
+            else
+              CMD_TO_RUN=""
+            fi
+
+            echo "▶ Run new container (detached)"
+            sudo docker run -d --name opsnow-healthcheck --restart unless-stopped \
+              "${IMAGE_REF}" ${CMD_TO_RUN}
+
+            echo "▶ Containers:"
+            sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+
+      - name: Verify container health (logs tail + optional HTTP check)
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "🩺 Last 50 log lines:"
+            sudo docker logs --tail 50 opsnow-healthcheck || true
+
+            # Optional: quick internal curl health check (adjust URL/port for your app)
+            # If your container exposes a port locally, you can curl it from the instance:
+            if command -v curl >/dev/null 2>&1; then
+              echo "🔍 Health endpoint test (http://localhost:8000/health):"
+              curl -f http://localhost:8000/health && echo "health OK" || echo "health endpoint failed or not present"
+            fi
