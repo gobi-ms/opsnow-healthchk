@@ -108,7 +108,7 @@ jobs:
             set -euxo pipefail
             echo "🚀 Starting deployment on $(hostname) at $(date)"
 
-            # === Ensure docker running ===
+            # === Ensure docker running ====
             echo "▶ Ensure docker is running"
             sudo systemctl start docker || true
 
