@@ -35,6 +35,16 @@ from openpyxl.styles import PatternFill
 
 load_dotenv()
 
+
+LOGIN_URL = "https://console.opsnow.com/home"
+OPSNOW_USERNAME=alertnow-sresupport@clouddestinations.com
+OPSNOW_PASSWORD=wyKlSZ4fo5Wknah#
+XERTICA_USERNAME=jaeyong.heo@bespinglobal.com
+XERTICA_PASSWORD=1qaz@WSX#
+SLACK_WEBHOOK=https://hooks.slack.com/services/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
+GOOGLE_CHAT_WEBHOOK=https://chat.googleapis.com/v1/spaces/AAQACAVWycg/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=qQfHoqwCBhnt0vJ473Rjwwl3Z1uvi5LT8d0eDB8GnGc
+ 
+
 def load_secrets_from_aws():
     """Fetch credentials from AWS Secrets Manager if not already set in env."""
     secret_name = "qa/healthcheck"
@@ -933,5 +943,6 @@ if __name__ == "__main__":
                 shutil.rmtree(TEMP_PROFILE_DIR, ignore_errors=True)
         except Exception:
             pass
+
 
 
