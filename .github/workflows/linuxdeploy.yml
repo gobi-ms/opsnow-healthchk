@@ -16,7 +16,7 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
-  AWS_ACCOUNT_ID: 900335273390
+  AWS_ACCOUNT_ID: 591706807878
   ECR_REPOSITORY: qa-an2p-health-check-ecr
 
 jobs:
@@ -89,7 +89,7 @@ jobs:
       IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
       ENTRY_CMD: ${{ github.event.inputs.entry_command || 'python src/global_monitor.py' }}
       AWS_REGION: us-east-1
-      AWS_ACCOUNT_ID: 900335273390
+      AWS_ACCOUNT_ID: 591706807878
 
     steps:
       - name: Assert required secrets exist
