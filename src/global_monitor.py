@@ -1,4 +1,5 @@
 import os
+import boto3
 import re
 import time
 import json
@@ -36,7 +37,7 @@ load_dotenv()
 
 def load_secrets_from_aws():
     """Fetch credentials from AWS Secrets Manager if not already set in env."""
-    secret_name = "qa/an2p/healthcheck/login_credentials"
+    secret_name = "qa/healthcheck"
     region_name = "us-east-1"
     try:
         # Initialize AWS Secrets Manager client
@@ -932,4 +933,5 @@ if __name__ == "__main__":
                 shutil.rmtree(TEMP_PROFILE_DIR, ignore_errors=True)
         except Exception:
             pass
+
 
