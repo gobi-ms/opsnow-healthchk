@@ -13,6 +13,9 @@ import pandas as pd
 import requests
 import yaml
 from dotenv import load_dotenv
+import chromedriver_autoinstaller
+import base64
+from webdriver_manager.chrome import ChromeDriverManager
 
 # Selenium
 from selenium import webdriver
@@ -24,7 +27,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # webdriver_manager (can be toggled/pinned via CHROMEDRIVER_VERSION)
-from webdriver_manager.chrome import ChromeDriverManager
+#from webdriver_manager.chrome import ChromeDriverManager
 
 # Excel styling
 from openpyxl import load_workbook
@@ -35,60 +38,84 @@ from openpyxl.styles import PatternFill
 
 load_dotenv()
 
+def _is_truthy(v: Optional[str]) -> bool:
+    return str(v or "").strip().lower() in ("1", "true", "yes", "y", "on")
 
-LOGIN_URL = "https://console.opsnow.com/home"
-OPSNOW_USERNAME=alertnow-sresupport@clouddestinations.com
-OPSNOW_PASSWORD=wyKlSZ4fo5Wknah#
-XERTICA_USERNAME=jaeyong.heo@bespinglobal.com
-XERTICA_PASSWORD=1qaz@WSX#
-SLACK_WEBHOOK=https://hooks.slack.com/services/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
-GOOGLE_CHAT_WEBHOOK=https://chat.googleapis.com/v1/spaces/AAQACAVWycg/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=qQfHoqwCBhnt0vJ473Rjwwl3Z1uvi5LT8d0eDB8GnGc
- 
-
-def load_secrets_from_aws():
-    """Fetch credentials from AWS Secrets Manager if not already set in env."""
-    secret_name = "qa/healthcheck"
-    region_name = "us-east-1"
+def load_yaml_as_env(path: str) -> Dict[str, str]:
+    """Load non-secret defaults from global_config.yaml and flatten to ENV vars."""
+    if not os.path.exists(path):
+        return {}
     try:
-        # Initialize AWS Secrets Manager client
-        client = boto3.client("secretsmanager", region_name=region_name)
-        get_secret_value_response = client.get_secret_value(SecretId=secret_name)
-        secret_dict = json.loads(get_secret_value_response["SecretString"])
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+    flat = {}
+    for section, values in data.items():
+        if isinstance(values, dict):
+            for key, val in values.items():
+                env_key = f"{section.upper()}_{key.upper()}"
+                if isinstance(val, (dict, list)):
+                    flat[env_key] = json.dumps(val)
+                elif val is None:
+                    flat[env_key] = ""
+                else:
+                    flat[env_key] = str(val)
+        else:
+            flat[section.upper()] = str(values)
+    return flat
 
-        # Populate environment variables only if not already present
-        for key, value in secret_dict.items():
-            os.environ.setdefault(key, value)
-
-        print("✅ Loaded credentials from AWS Secrets Manager")
+def load_secrets_manager(secret_name: str) -> Dict[str, str]:
+    """Loads secret JSON from AWS Secrets Manager."""
+    if not secret_name:
+        return {}
+    try:
+        import boto3
+        client = boto3.client("secretsmanager")
+        resp = client.get_secret_value(SecretId=secret_name)
+        secret_string = resp.get("SecretString")
+        if not secret_string and resp.get("SecretBinary"):
+            secret_string = base64.b64decode(resp["SecretBinary"]).decode("utf-8")
+        parsed = json.loads(secret_string)
+        return {k: str(v) for k, v in parsed.items()}
     except Exception as e:
-        print(f"⚠️ Could not load secrets from AWS Secrets Manager: {e}")
+        print("Warning: could not load Secrets Manager:", e)
+        return {}
 
-# Call this before reading env vars
-load_secrets_from_aws()
-# --- 👆 End new block 👆 ---
+# --- Load YAML defaults (non-secret) ---
+CONFIG_PATH_LOCAL = "src/global_config.yaml"
+yaml_env = load_yaml_as_env(CONFIG_PATH_LOCAL)
+for k, v in yaml_env.items():
+    if os.getenv(k) is None:
+        os.environ[k] = v
 
-def env_bool(name: str, default=False) -> bool:
-    v = os.getenv(name, str(default)).strip().lower()
-    return v in ("1", "true", "yes", "y", "on")
+# --- Load AWS Secrets (secret values) ---
+USE_SECRETS_MANAGER = _is_truthy(os.getenv("USE_SECRETS_MANAGER", "false"))
+SECRET_NAME = os.getenv("SECRET_NAME", "")
+if USE_SECRETS_MANAGER and SECRET_NAME:
+    secrets = load_secrets_manager(SECRET_NAME)
+    for sk, sv in secrets.items():
+        os.environ[sk] = sv   # overwrite YAML
 
-LOGIN_URL         = os.getenv("LOGIN_URL", "")
-USERNAME          = os.getenv("OPSNOW_USERNAME", "")
-PASSWORD          = os.getenv("OPSNOW_PASSWORD", "")
-EXCEL_FILE_PREFIX = "global_health_check_report"
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
-HEADLESS          = env_bool("HEADLESS", True)
-TIMEOUT           = int(os.getenv("TIMEOUT", "30"))
-RENDER_RETRY      = int(os.getenv("RENDER_RETRY", "15"))
-LOCATOR_DEBUG     = env_bool("LOCATOR_DEBUG", False)
-CHROMEDRIVER_VERSION = os.getenv("CHROMEDRIVER_VERSION", "").strip()
-CHROME_USER_DATA_DIR = os.getenv("CHROME_USER_DATA_DIR", "").strip()  # optional: use a fixed path
+# --- Final runtime ENV values used by application ---
+LOGIN_URL          = os.getenv("LOGIN_URL", "https://console.opsnow.com/home")
+OPSNOW_USERNAME    = os.getenv("OPSNOW_USERNAME", "")
+OPSNOW_PASSWORD    = os.getenv("OPSNOW_PASSWORD", "")
+XERTICA_USERNAME   = os.getenv("XERTICA_USERNAME", "")
+XERTICA_PASSWORD   = os.getenv("XERTICA_PASSWORD", "")
+SLACK_WEBHOOK_URL  = os.getenv("SLACK_WEBHOOK_URL", "")
+GOOGLE_CHAT_WEBHOOK = os.getenv("GOOGLE_CHAT_WEBHOOK", "")
 
-# Optional: fetch YAML from S3 instead of local file
-CONFIG_URI        = ""  # Hardcoded to use local file
-CONFIG_PATH_LOCAL = "global_config.yaml"
+HEADLESS           = _is_truthy(os.getenv("RUNTIME_HEADLESS", "true"))
+TIMEOUT            = int(os.getenv("RUNTIME_TIMEOUT", "30"))
+RENDER_RETRY       = int(os.getenv("RUNTIME_RENDER_RETRY", "15"))
+CHROMEDRIVER_VERSION = os.getenv("DRIVER_CHROMEDRIVER_VERSION", "").strip()
+CHROME_USER_DATA_DIR = os.getenv("DRIVER_CHROME_USER_DATA_DIR", "").strip()
 
-# Label keys for JS scan fallback
-SERVER_LABEL_KEYS = ["total server", "total servers", "server", "servers", "서버", "총 서버"]
+EXCEL_FILE_PREFIX = os.getenv("REPORTING_EXCEL_FILE_PREFIX", "global_health_check_report")
+
+CONFIG_URI = os.getenv("CONFIG_URI", "")
+# ============================ END LOADER ======================================
 
 
 # ============================ FILE HELPERS ============================
@@ -180,54 +207,82 @@ def slack_notify(check_name: str, incident_msg: str, screenshot_path: Optional[s
 
 # ============================ SELENIUM/SSO ============================
 
+
 def create_driver():
-    """Create Chrome driver with a unique user-data-dir to avoid 'already in use' errors."""
+    """
+    Create a Chrome driver that supports:
+    - ARM64 EC2 (installs chromium + chromium-driver)
+    - AMD64 EC2 (installs Google Chrome + matching chromedriver)
+    - Avoids webdriver-manager downloading wrong architecture binaries
+    """
     global TEMP_PROFILE_DIR
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    import shutil
+    import subprocess
 
     chrome_options = Options()
     if HEADLESS:
         chrome_options.add_argument("--headless=new")
+
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--ignore-certificate-errors")
-    chrome_options.add_argument("--allow-insecure-localhost")
-    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--no-default-browser-check")
-    chrome_options.add_argument("--disable-default-apps")
-    chrome_options.add_argument("--disable-notifications")
+    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-features=TranslateUI")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
 
-    # --- KEY FIX: unique Chrome profile per run ---
-    # If CHROME_USER_DATA_DIR env is set, use it; else create a temp dir and clean it up on exit.
-    profile_dir = CHROME_USER_DATA_DIR
-    if profile_dir:
-        os.makedirs(profile_dir, exist_ok=True)
-        TEMP_PROFILE_DIR = None  # user provided — don't delete
-    else:
-        TEMP_PROFILE_DIR = tempfile.mkdtemp(prefix="opsnow_chrome_")
-        profile_dir = TEMP_PROFILE_DIR
-
+    # ---- USER DATA DIR FIX ----
+    profile_dir = CHROME_USER_DATA_DIR or tempfile.mkdtemp(prefix="opsnow_chrome_")
+    if not CHROME_USER_DATA_DIR:
+        TEMP_PROFILE_DIR = profile_dir
     chrome_options.add_argument(f"--user-data-dir={profile_dir}")
-    chrome_options.add_argument(f"--disk-cache-dir={os.path.join(profile_dir, 'cache')}")
-    chrome_options.add_argument("--profile-directory=Default")
 
-    # webdriver_manager
-    if CHROMEDRIVER_VERSION:
-        drv = webdriver.Chrome(
-            service=Service(ChromeDriverManager(version=CHROMEDRIVER_VERSION).install()),
-            options=chrome_options
-        )
+    # ---- DETECT ARCH ----
+    arch = subprocess.check_output(["uname", "-m"]).decode().strip()
+    print(f"Detected architecture: {arch}")
+
+    # ---- ARM64 PATH (Graviton) ----
+    if arch in ("aarch64", "arm64"):
+
+        print("ARM64 detected → using system chromium + chromium-driver")
+
+        # Ensure chromium exists
+        if not shutil.which("chromium") and not shutil.which("chromium-browser"):
+            raise RuntimeError("Chromium is not installed inside the Docker image.")
+
+        # Ensure chromedriver exists
+        chromedriver_path = shutil.which("chromedriver")
+        if not chromedriver_path:
+            raise RuntimeError("chromium-driver is not installed inside the Docker image.")
+
+        print(f"Using chromium driver at: {chromedriver_path}")
+        driver = webdriver.Chrome(service=Service(chromedriver_path), options=chrome_options)
+
+    # ---- AMD64 PATH ----
     else:
-        drv = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=chrome_options
-        )
-    w = WebDriverWait(drv, TIMEOUT)
-    return drv, w
+        print("AMD64 detected → using Google Chrome + matching chromedriver")
+
+        try:
+            chrome_bin = shutil.which("google-chrome") or shutil.which("chrome")
+            if chrome_bin:
+                chrome_options.binary_location = chrome_bin
+
+            # Use webdriver-manager but ensure correct version
+            if CHROMEDRIVER_VERSION:
+                chromedriver_path = ChromeDriverManager(driver_version=CHROMEDRIVER_VERSION).install()
+            else:
+                chromedriver_path = ChromeDriverManager().install()
+
+            print(f"Using chromedriver at: {chromedriver_path}")
+            driver = webdriver.Chrome(service=Service(chromedriver_path), options=chrome_options)
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to start Chrome on AMD64: {e}")
+
+    wait = WebDriverWait(driver, TIMEOUT)
+    return driver, wait
+
 
 def on_keycloak() -> bool:
     try:
@@ -943,6 +998,7 @@ if __name__ == "__main__":
                 shutil.rmtree(TEMP_PROFILE_DIR, ignore_errors=True)
         except Exception:
             pass
+
 
 
 
